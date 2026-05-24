@@ -2,31 +2,69 @@
 
 **Universal turbine engine ECU firmware for ESP32.**
 
-OpenTurbine is an open-source engine control unit for small jet turbines. It runs on a standard ESP32 development board and provides a full control loop — startup sequencing, oil pressure regulation, dynamic idle hold, safety shutdowns, and a Wi-Fi web interface — with zero code changes between different engine builds. All hardware differences are declared in a single file.
+OpenTurbine is an open-source engine control unit for small jet turbines. It runs on a standard ESP32 (or ESP32-S3) development board and provides a complete control loop — startup sequencing, oil pressure regulation, dynamic idle hold, safety shutdowns, afterburner management, and a Wi-Fi web interface — with zero code changes between different engine builds. All hardware differences are declared in a single header file and tuned at runtime via the web UI.
 
 ---
 
 ## Features
 
-- **Block-based startup/shutdown sequencer** — each stage (oil prime, starter spin, pre-ignition, flame confirm, spool, safety hold, cooldown…) is an independent, swappable block
-- **Closed-loop oil pressure control** — P-controller with throttle-mapped target and open-loop failsafe
-- **Dynamic idle hold** — asymmetric RPM ramp with optional PI integral term eliminates steady-state droop
-- **Direct throttle input mapping** — physical throttle pot or RC stick drives fuel ESC demand in RUNNING mode
-- **Throttle expo curve** — configurable exponential response softens stick sensitivity near idle
-- **Throttle slew limiting** — configurable up/down ramp rates prevent compressor stall
-- **Safety monitor** — overspeed, overtemp, low oil, flameout — each independently configurable
-- **RPM sensor health tracking** — detects saturated readings, zero-stuck, and RPM jump faults
-- **Flight recorder** — persistent event log with sensor snapshots, downloadable as JSON or CSV
-- **Session logger** — per-run data stream (N1, N2, TOT, oil, throttle) at configurable rate
-- **Wi-Fi web UI** — dashboard, calibration wizard, config editor, log viewer, diagnostic tools
-- **Captive portal** — connecting to the ECU's WiFi AP automatically opens the dashboard in any browser
-- **Engine type presets** — one-click preset limits and timing for common turbine types
-- **Config backup & restore** — download/upload full config as JSON from the Tools page
-- **Relight support** — automatic ignition retry on flameout if N1 is sufficient
-- **Limp mode** — throttle cap on partial sensor failure
-- **Instrument cluster output** — serial telemetry to compatible external displays
-- **OTA-capable partition table** — dual firmware slots, 1.375 MB LittleFS for web assets and logs
-- **Everything optional** — every sensor, actuator, controller, and safety check compiles to zero code when not declared
+### Engine control
+- **Block-based startup/shutdown sequencer** — each stage (oil prime, glow preheat, starter spin, pre-ignition, fuel open, flame confirm, temp confirm, spool, safety hold, cooldown…) is an independent, swappable, runtime-configurable block
+- **Closed-loop oil pressure control** — P-controller with throttle-mapped target (idle → full throttle interpolation), open-loop failsafe on sensor fault, configurable deadband
+- **Dynamic idle hold** — asymmetric RPM ramp, optional PI integral term, selectable N1 or N2 source
+- **Throttle slew limiting** — configurable up/down ramp rates with safety pullback near RPM/TOT limits
+- **Power turbine governor** — closed-loop N2 RPM control via propeller pitch servo for turboprop builds
+- **Afterburner state machine** — full AB ignition/shutdown sequencer (ABCheckReady → ABIgnite → ABFlameConfirm → ABStabilize) with torch mode, fuel offset, pump-follows-throttle demand, independent igniter
+- **Automation rules engine** — up to 8 user-defined threshold rules (sensor op value → actuator demand) evaluated every loop tick
+- **Glow plug support** — current-sensor-based saturation detection with dwell/rest state machine
+- **Bleed valve control** — compressor bleed valve commands for surge prevention
+
+### Safety monitor
+- Overspeed, overtemp (TOT and TIT), low oil pressure, oil-near-zero
+- EGT rate-of-rise — triggers before temperature limit is reached
+- Hot start detection — aborts startup if TOT is still too high
+- Flameout detection with configurable hold time and automatic relight
+- Compressor surge detection via N1 RPM variance analysis
+- Fuel pressure low (in RUNNING only)
+- Battery / bus undervoltage
+- General-purpose digital input fault and e-stop channels
+- Each check independently enabled/disabled in hardware config; all disabled in bench mode
+
+### Sensors (HAL)
+- **PCNTRpmSensor** — ESP32 hardware PCNT pulse counter; tracks RPM jump, saturation, zero-stuck, and zero-glitch faults
+- **MAX6675TempSensor** — SPI thermocouple with ring-buffer averaging and open-circuit detection
+- **MAX31855TempSensor** — direct SPI bit-bang, no library; K-type, fault detection
+- **MAX31856TempSensor** — direct SPI bit-bang; all thermocouple types (B E J K N R S T), 0.0078 °C resolution
+- **DS18B20TempSensor** — 1-Wire async digital thermometer (non-blocking, placement-new, 9–12 bit)
+- **NTCSensor** — NTC thermistor via Steinhart-Hart B-parameter equation, configurable divider
+- **AnalogPolySensor** — cubic polynomial (oil pressure), linear, and threshold (flame detection) variants
+- **RCInput** — interrupt-driven RC PWM decoder for idle and throttle inputs (same GPIO as ADC, no pin change)
+- **MockSensor** — scripted ramp values for DEV_MODE bench testing
+
+### Actuators (HAL)
+- **ServoActuator** — 50 Hz servo PWM 1000–2000 µs (throttle ESC, starter ESC, prop pitch)
+- **LEDCActuator** — high-frequency ESP32 LEDC PWM (oil pump, fuel pump 2, AB pump), invertible
+- **RelayActuator** — digital relay/MOSFET driver, active-high or active-low
+- **MockActuator** — logs all calls for DEV_MODE bench testing
+
+### Connectivity
+- **Wi-Fi captive portal** — connecting to the ECU AP opens the dashboard automatically
+- **mDNS** — accessible as `http://ot.local` on any mDNS-capable client
+- **MAVLink v1 TX** — HEARTBEAT, NAMED_VALUE_FLOAT telemetry, STATUSTEXT fault alerts over UART
+- **Cluster serial** — JetEcu-compatible serial protocol v2 with schema-first boot sequence
+- **OTA firmware upgrade** — dual-partition, browser-based, reboots into new image automatically
+
+### Data logging
+- **FlightRecorder** — mutex-protected persistent ring-buffer event log (BOOT, START_ATTEMPT, block transitions, RUNNING_ENTRY, FAULT, ABORT, RELIGHT_ATTEMPT, SNAP sensor snapshots)
+- **SessionLogger** — per-run CSV stream with configurable channel mask at configurable interval; deferred Core 0 write path; automatic oldest-session eviction when flash is low
+
+### Developer / diagnostic
+- **Sequence validator** — at boot, cross-checks each block against fitted hardware; flags errors (block START) and warnings, displayed in web UI
+- **Dev mode / bench mode** — mock sensors, live config changes, safety bypasses, timer-based sequence completion; never compiled into release unless flag is set
+- **Buzzer patterns** — passive piezo tones for mode transitions and fault
+- **Status LED** — mode-driven blink pattern (1–4 blinks + rapid fault flash)
+- **Peak value tracking** — session maxima for N1, N2, TOT, TIT, oil temp, fuel pressure, battery
+- **Run counter and engine-time accumulator** — persisted across power cycles
 
 ---
 
@@ -36,35 +74,47 @@ OpenTurbine is an open-source engine control unit for small jet turbines. It run
 
 | Component | Notes |
 |---|---|
-| ESP32 development board | Classic ESP32, 4 MB flash. Tested on 30-pin and 38-pin dev modules |
-| STOP switch | Active-low, wired to `OT_STOP_PIN` (default GPIO 15) |
-| N1 RPM sensor | Hall-effect pulse sensor → PCNT counter (GPIO 14 default) |
-| EGT/TOT sensor | MAX6675 or MAX31855 thermocouple module (SPI) |
-| Oil pressure sensor | Analog 0–3.3 V output, ADC1 pin (GPIO 34 default) |
-| Flame/ignition sensor | Analog threshold (photodiode or UV sensor), ADC1 pin (GPIO 35 default) |
-| Throttle ESC | Standard servo PWM, 1000–2000 µs |
-| Starter motor ESC | Standard servo PWM, 1000–2000 µs |
-| Oil pump | PWM-controlled (MOSFET + BLDC or brushed pump) |
+| ESP32 or ESP32-S3 dev board | 4 MB flash minimum. Classic 30-/38-pin modules or S3 DevKitC |
+| STOP switch | Active-low, wired to `stopPin` (default GPIO 15) |
+| N1 RPM sensor | Hall-effect or optical pulse sensor → PCNT counter |
+| EGT / TOT sensor | MAX6675, MAX31855, MAX31856, or DS18B20 |
+| Throttle ESC | Standard servo PWM 1000–2000 µs |
+| Starter motor ESC or relay | Servo PWM or relay |
 | Fuel solenoid | Relay or logic-level MOSFET |
 | Igniter | Relay, MOSFET, or direct inductive coil drive |
-| Starter enable relay | Powers the starter ESC |
 
-### Optional
+> All pin numbers, sensor types, and feature enables are set at runtime via the **Hardware** web page — no recompile needed after initial flash.
 
-| Component | Enable flag |
+### Optional — all enabled at runtime
+
+| Component | Role |
 |---|---|
-| N2 RPM sensor | `OT_HAS_N2_RPM` |
-| Fuel flow sensor | `OT_HAS_FUEL_FLOW` |
-| P1 / P2 pressure sensors | `OT_HAS_P1`, `OT_HAS_P2` |
-| Throttle position sensor | `OT_HAS_THROTTLE_POS` |
-| Idle adjust potentiometer | `OT_HAS_IDLE_POT` |
-| Afterburner solenoid | `OT_HAS_AB_SOL` |
-| Air-starter solenoid | `OT_HAS_AIRSTARTER_SOL` |
-| Cooling fan relay | `OT_HAS_COOL_FAN` |
-| Status LED | `OT_HAS_STATUS_LED` |
-| Instrument cluster (serial) | `OT_HAS_CLUSTER_SERIAL` |
+| N2 RPM sensor | Power turbine / compressor 2 shaft speed |
+| TOT / TIT sensors | Turbine outlet and inlet temperature monitoring |
+| Oil pressure sensor | Analog ADC or configurable type |
+| Oil temperature sensor | DS18B20, NTC, or analog |
+| Flame sensor | Analog threshold (photodiode / UV) |
+| Fuel pressure sensor | Analog ADC |
+| Fuel flow sensor | Frequency-based or analog |
+| Battery / bus voltage sensor | Analog ADC voltage divider |
+| P1 / P2 pressure sensors | Inlet and exhaust pressure |
+| Fuel pump 2 | Independent variable-speed fuel pump (LEDC) |
+| Oil scavenge pump | Additional drain pump |
+| Glow plug | With optional current sensor |
+| Bleed valve | Compressor bleed solenoid or servo |
+| Afterburner solenoid, pump, igniter | Full AB support |
+| Propeller pitch servo | Turboprop N2 governor |
+| Cooling fan | Relay or LEDC |
+| Air-starter solenoid | Pneumatic starter valve |
+| DI channels (×4) | Configurable roles: fault, estop, ab_arm, ab_fire, inhibit_start, limp_mode |
+| Start switch | Hardware start button |
+| Buzzer | Passive piezo for mode/fault tones |
+| Status LED | Any GPIO |
+| MAVLink UART | Any UART TX pin |
+| Cluster serial | JetEcu display protocol |
+| RC PWM inputs | Servo signal for throttle and/or idle |
 
-> **ADC note:** Oil and flame sensors must be on ADC1 pins (GPIO 32–39). ADC2 is unavailable while Wi-Fi is active.
+> **ADC note:** Analog sensors must be on ADC1 pins (GPIO 32–39 on classic ESP32; GPIO 1–10 on ESP32-S3). ADC2 is unavailable while Wi-Fi is active.
 
 ---
 
@@ -73,182 +123,200 @@ OpenTurbine is an open-source engine control unit for small jet turbines. It run
 ### 1. Prerequisites
 
 - [PlatformIO](https://platformio.org/) (VS Code extension or CLI)
-- ESP32 dev board with USB cable
+- ESP32 or ESP32-S3 dev board with USB cable
 
 ### 2. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/OpenTurbine.git
+git clone https://github.com/EliasLaaj/OpenTurbine.git
 cd OpenTurbine
 ```
 
-### 3. Configure your hardware
+### 3. Set your hardware profile
 
-Open `hardware_profile.h` to set compile-time defaults (pin numbers, profile ID). After first boot, you can fine-tune all hardware settings via the **Hardware** web page without recompiling — changes are saved to `ecu_config.json` on the device.
-
-Set your profile ID and pin assignments:
+Open `hardware_profile.h` and set the compile-time profile ID and any pin defaults. All hardware settings can be changed at runtime via the web UI — `hardware_profile.h` is only the starting point:
 
 ```cpp
-#define OT_PROFILE_ID   "my_turbine_v1"   // must match config.json at runtime
+#define OT_PROFILE_ID   "my_turbine_v1"   // must match runtime config
 #define OT_PROFILE_DESC "My turbine, rev 1"
 
-#define OT_STOP_PIN    15    // active-low hardware stop — MANDATORY
+// Pin defaults (all overridable at runtime via Hardware web page)
+#define OT_STOP_PIN    15    // MANDATORY
 #define OT_START_PIN   13
-
-// Enable only the sensors you have wired:
-#define OT_HAS_N1_RPM
-#define OT_N1_RPM_PIN  14
-
-#define OT_HAS_TOT
-#define OT_TOT_CLK  5
-#define OT_TOT_CS   18
-#define OT_TOT_MISO 19
-
-// ...and so on for actuators, controllers, safety sources
 ```
 
-Missing mandatory items cause clear compile-time errors. Optional items that are commented out compile to zero code.
+For **ESP32-S3** use the `esp32s3dev` environment — the profile auto-detects the correct ADC pin range.
 
-### 4. Flash the filesystem
+### 4. Flash the filesystem and firmware
 
-Upload the web UI to LittleFS (only needed once, or after UI changes):
+The fastest path — builds firmware and uploads both firmware and the gzip-compressed web UI:
 
 ```bash
-pio run --target uploadfs
+# Windows PowerShell
+.\flash.ps1
+
+# Cross-platform CLI
+pio run -e esp32dev -t upload
+pio run -e esp32dev -t uploadfs
 ```
 
-### 5. Build and flash firmware
+If the board is already in boot mode (IO0 low), the `--before=no_reset` flag in `platformio.ini` skips the automatic reset handshake.
 
-```bash
-pio run --target upload
-```
-
-### 6. Connect and calibrate
+### 5. Connect and calibrate
 
 1. Power on the ESP32
-2. Connect to the Wi-Fi access point: **SSID = your `profile_id`** (default: `OpenTurbine`). No password by default — you can set one in the Hardware page (`wifi_password` field)
-3. Open **`http://192.168.4.1`** in a browser — or **`http://ot.local`** on any mDNS-capable client (Mac, Linux, Windows 10+)
-4. Go to **Calibration** and follow the guided wizards for throttle, oil sensor, and flame threshold
-5. Go to **Config** and tune parameters for your engine (RPM limits, temperature limits, oil pressure targets, timing)
-6. Download `config.json` as a backup
+2. Connect to the Wi-Fi AP — **SSID = your `profile_id`** (default: `OpenTurbine`)
+3. Open **`http://192.168.4.1`** or **`http://ot.local`** in a browser
+4. Go to **Calibration** and follow the guided wizards for throttle, oil pressure sensor, and flame threshold
+5. Go to **Config** and set RPM limits, temperature limits, oil targets, and timing for your engine
+6. Go to **Hardware** to verify pin assignments and enable optional features
+7. Go to **Sequence** to review and customise the startup / shutdown block order
+8. Download `ecu_config.json` from Tools as a backup
 
-> **First boot:** If no `ecu_config.json` exists on the device, default values are generated automatically. The `profile_id` in `hardware_profile.h` must match the `profile_id` field in `ecu_config.json` — a mismatch locks all engine operations and shows a banner on the Dashboard with step-by-step instructions to fix it. Go to the Hardware page and verify/update the `profile_id` field, or download the config, edit the field, and re-upload it.
+> **Profile ID check:** The `profile_id` in `hardware_profile.h` must match the `profile_id` in the runtime config. A mismatch blocks all engine operations and shows a banner with fix instructions. Visit the Hardware page and update the field, or upload a corrected config JSON.
 
 ---
 
 ## Web interface
 
-Connect to the `OpenTurbine` access point and open `http://192.168.4.1` (or `http://ot.local`).
-
 ### Dashboard
-Live N1 RPM, TOT, oil pressure, mode, and sensor health. Start (with confirmation dialog) and Stop buttons. Color-coded gauge bars show proximity to safety limits. Sparkline trends for N1 and TOT. Startup sequence progress bar during STARTUP/SHUTDOWN. Fault description card with plain-language "what to do" guidance. Hour meter showing total run count and accumulated engine-on time. WebSocket-driven updates at ~200 ms.
+Live N1 RPM, N2 RPM, TOT, TIT, oil pressure, battery voltage, mode, and sensor health. Start (with confirmation dialog) and Stop buttons. Color-coded gauge bars showing proximity to safety limits. Sparkline trends. Startup sequence progress bar. Fault description card with plain-language "what to do" guidance. Peak values, run count, and hour meter. WebSocket-driven updates at ~200 ms.
 
 ### Calibration
-Pre-flight checklist at the top (check off items before first run). Guided step-by-step wizards for each analog sensor:
-- **Throttle** — live bar, capture min/max at stick endpoints
-- **Oil pressure** — multi-point capture with known reference pressures
-- **Flame sensor** — automated noise-floor capture (no manual input needed)
+Pre-flight checklist. Guided step-by-step wizards:
+- **Throttle** — live bar, capture ADC min/max at stick endpoints
+- **Oil pressure** — multi-point capture with known reference pressures, polynomial or linear fit
+- **Flame sensor** — automated noise-floor capture
 
 ### Config
-All parameters editable in the browser, grouped by section. **Basic/Expert toggle** hides advanced tuning parameters in Basic mode so new users only see the essential settings. Config is locked during engine operation (unless Dev Mode is enabled). Download/upload `ecu_config.json` for backup and transfer between devices.
+All parameters grouped by section. **Basic / Expert toggle** hides advanced parameters for new users. Config is locked during engine operation. Download / upload `ecu_config.json` for backup and transfer.
 
 ### Hardware
-Runtime hardware topology editor — configure GPIO pin assignments, sensor types, actuator types, sequence names, and safety feature enables **without recompiling**. Settings are stored in the `hardware` section of `ecu_config.json`.
-
-> **Important:** Hardware changes require a reboot to take effect. The engine must be in STANDBY to save Hardware changes. Pin numbers must match your physical wiring.
-
-> **Profile ID:** The `profile_id` field (also used as the WiFi AP SSID) must match the `OT_PROFILE_ID` defined in `hardware_profile.h`. A mismatch locks all engine operations and shows an error on the dashboard with instructions to fix it.
+Runtime hardware topology editor — GPIO pin assignments, sensor types, actuator types, safety enables, DI channel roles, AB configuration, MAVLink / cluster serial settings — **without recompiling**. Requires reboot to apply. Engine must be in STANDBY to save.
 
 ### Sequence
-Runtime sequence editor — define the startup and shutdown block order by name without recompiling. Each block name must exist in the block registry (see `main.cpp`). Changes take effect at the next START command without requiring a reboot.
+Runtime sequence editor — define startup, shutdown, AB ignition, and AB shutdown block order by name without recompiling. Sequence validator results shown inline (errors block START; warnings are advisory). Changes take effect at the next START without a reboot.
 
 ### Log
-Per-run summary cards with peak N1, peak TOT, duration, and outcome. Expandable event detail with sensor snapshots. Session Data tab shows the in-browser CSV preview (last 50 rows) and lets you choose which channels to log. Download as JSON or CSV.
+Per-run summary cards with peak N1, peak TOT, duration, and outcome. Expandable event detail with sensor snapshots. Session Data tab with CSV preview and channel selection. Download as JSON or CSV.
 
 ### Tools
-Diagnostic actuator tests available in STANDBY:
-- Fuel prime, oil prime, ignition test, starter test, fuel solenoid test
-- Extra cooldown (runs oil pump/starter for additional cooling after shutdown)
+Diagnostic actuator tests (STANDBY only, all auto-expire):
+- Fuel prime, fuel solenoid test, oil prime, oil scavenge test
+- Igniter test (×2), glow plug test, starter test, starter enable test
+- Idle throttle test, fuel pump 2 test, AB solenoid test, AB pump test
+- Cooling fan test, airstarter test, bleed valve test, prop pitch test
+- Extra cooldown (runs starter + oil pump for operator-set duration after shutdown)
 
 ---
 
 ## Configuration reference
 
-Runtime parameters live in `config.json` (stored on LittleFS, editable via web UI).
-
-Key sections:
+All parameters live in `ecu_config.json` on LittleFS, editable via the web Config page.
 
 | Section | What it controls |
 |---|---|
-| `engine` | RPM limit, min RPM, TOT limit, TOT cooldown target, safe margin |
-| `oil` | Startup pressure, running pressure target, throttle-mapped min/max, controller gains, failsafe duty |
-| `oil_advanced` | Zero-pressure fault threshold, P-controller deadband |
-| `sequence.startup` | Per-block timeouts and RPM thresholds (oil arm, pre-ignition, flame confirm, spool) |
-| `sequence.shutdown` | RPM drop timeout, cooldown timeout, cooldown hardware selection |
-| `ignition` | Post-ignition dwell time before spool |
-| `throttle` | Slew ramp rates (up/down), idle percentage range |
-| `dynamic_idle` | Target RPM, ramp rates, deadband, N1 vs N2 source |
-| `safety` | Check interval, flameout hold duration |
-| `relight` | Enable/disable auto-relight on flameout, minimum RPM to attempt |
-| `standby_oil` | Windmill protection — oil pump activation threshold and duty in STANDBY |
-| `starter_assist` | Post-start starter assist duty % and disengage RPM |
-| `limp_mode` | Throttle cap when limp mode is active |
-| `rpm_health` | RPM jump fault threshold, zero-stuck tick count |
-| `tools` | Diagnostic test durations (fuel prime, oil prime, ignition test, etc.) |
+| `engine` | RPM limit, min RPM, TOT limit, TOT cooldown target, hot-start threshold |
+| `oil` | Startup / running pressure targets, throttle-mapped min/max, P-gain, deadband, failsafe duty |
+| `oil_advanced` | Oil-near-zero fault threshold, overcurrent threshold |
+| `sequence.startup` | Per-block timeouts (oil prime, pre-ignition, flame confirm, spool, safety hold…) |
+| `sequence.shutdown` | RPM drop timeout, cooldown timeout, cooldown mode, cooldown pressure target |
+| `ignition` | Post-ignition dwell time, glow plug presets |
+| `throttle` | Slew ramp rates (up/down), idle % range, expo curve, limp mode cap |
+| `dynamic_idle` | Target RPM, ramp rates, deadband, P/I gains, N1 vs N2 source |
+| `governor` | N2 target RPM, P-gain, pitch slew limit, pitch range (turboprop) |
+| `safety` | Check interval, per-fault enable flags, flameout hold time, EGT rise-rate limit |
+| `relight` | Enable/disable auto-relight, minimum N1 RPM, relight timeout |
+| `ab` | Trigger source, throttle threshold, arm-switch requirement, fuel offset, pump min/max %, torch TOT limit |
+| `rules` | Up to 8 automation rules (sensor, op, threshold, actuator, on_value, off_value) |
+| `standby_oil` | Windmill protection — oil pump duty and N1 activation threshold in STANDBY |
+| `starter_assist` | Duty % and disengage RPM for post-spool starter support |
+| `rpm_health` | Jump fault threshold, zero-stuck tick count |
+| `tools` | Diagnostic test durations (fuel prime, oil prime, igniter, starter…) |
 | `telemetry` | WebSocket push rate, flight recorder snapshot interval |
-| `cluster` | Warning thresholds for external cluster display |
-| `display` | Dashboard options (show/hide P1/P2 pressure sensors) |
-| `rc_input` | RC PWM calibration (min/max µs, failsafe timeout) |
-| `misc` | Cooldown skip hold time, igniter-on-start behaviour |
-| `session_log` | Which channels to record in the per-run CSV (N1, N2, TOT, oil, P1, P2, throttle, mode) |
-| `calibration` | Throttle ADC range, flame threshold, oil polynomial coefficients, P1/P2 zero offsets |
-
-All fields are documented with descriptions and default values in the web Config page.
+| `cluster` | Warning thresholds sent to external cluster display |
+| `mavlink` | MAVLink heartbeat rate, telemetry field list |
+| `display` | Dashboard visible sensor panels |
+| `rc_input` | RC PWM min/max µs, failsafe timeout |
+| `misc` | Cooldown skip hold time, igniter-on-start, manual relight settings |
+| `session_log` | Channel mask (N1, N2, TOT, TIT, oil, P1, P2, throttle, mode…), log interval ms |
+| `calibration` | Throttle ADC range, flame threshold, oil polynomial coefficients, voltage divider scale |
 
 ---
 
-## Architecture overview
+## Architecture
 
 ```
-hardware_profile.h          ← compile-time hardware topology (only file you edit)
+hardware_profile.h              ← compile-time topology (pins, profile ID)
     │
     ▼
 src/
-├── main.cpp                ← setup() / loop() wiring only
-├── Hardware.h              ← sensor + actuator instances, applyConfig(), runControllers()
+├── main.cpp                    ← setup() / loop(), mode state machine, command handler
+├── Hardware.h                  ← sensor/actuator globals, applyConfig(), runControllers()
 │
 ├── hal/
-│   ├── sensors/            ← ISensor implementations (PCNT RPM, ADC, MAX6675, MAX31855, mock)
-│   └── actuators/          ← IActuator implementations (servo PWM, LEDC, relay, mock)
+│   ├── sensors/                ← ISensor: PCNT RPM, ADC (poly/linear/threshold),
+│   │                               MAX6675, MAX31855, MAX31856, DS18B20, NTC, RC PWM, Mock
+│   └── actuators/              ← IActuator: Servo PWM, LEDC PWM, Relay, Mock
 │
 ├── engine/
-│   ├── EngineData.h        ← central volatile data bus (singleton, read by Core 0 safely)
-│   ├── SafetyMonitor.h     ← fault detection → enterShutdown()
-│   ├── controllers/        ← OilPressureLoop, ThrottleSlew, DynamicIdle
+│   ├── EngineData.h            ← central volatile data bus (singleton, Core 0 read-safe)
+│   ├── SafetyMonitor.h         ← fault detection → enterFaultShutdown()
+│   ├── controllers/
+│   │   ├── OilPressureLoop.h   ← P-controller, throttle-mapped target, failsafe
+│   │   ├── ThrottleSlew.h      ← ramp limiter, safety pullback
+│   │   ├── DynamicIdle.h       ← PI idle RPM hold
+│   │   └── PowerTurbineGovernor.h ← N2 closed-loop pitch controller (turboprop)
 │   └── sequencer/
-│       ├── SequenceEngine.h
-│       └── blocks/         ← OilPrime, StarterSpin, PreIgnSpark, FuelOpen,
-│                               FlameConfirm, PostIgnDwell, Spool, SafetyHold,
-│                               ImmediateCut, RPMDrop, CooldownSpin, FinalStop
+│       ├── SequenceEngine.h    ← IBlock state machine, bench mode, callbacks
+│       └── blocks/             ← OilPrime, GlowPreheat, StarterSpin, PreIgnSpark,
+│                                   FuelOpen, FuelPulse, FlameConfirm, TempConfirm,
+│                                   TimedDelay, FuelPumpIdle, ModifiedIdle, Spool,
+│                                   SafetyHold, ImmediateCut, RPMDrop, CooldownSpin,
+│                                   FinalStop, BleedOpen/Close, FuelPumpRamp,
+│                                   FuelPump2Set, GovernorHold, WaitForInput,
+│                                   WaitTOTCool, ThrottleSet, PreHeat,
+│                                   ABCheckReady, ABIgnite, ABFlameConfirm, ABStabilize,
+│                                   + simple ActuatorBlocks (IgniterOn/Off, OilPumpOn/Off…)
 │
 ├── system/
-│   ├── Config.h/.cpp       ← JSON load/save, profile ID check, config locking
-│   ├── FlightRecorder.h/.cpp ← persistent event log to LittleFS
-│   ├── SessionLogger.h/.cpp  ← per-run data stream
-│   ├── ClusterSerial.h/.cpp  ← serial telemetry to external cluster
-│   ├── CommandQueue.h/.cpp   ← thread-safe Core 0 → Core 1 command pipe
-│   └── web/                  ← AsyncWebServer, WebSocket, REST endpoints
+│   ├── Config.h/.cpp           ← JSON load/save, profile ID check, PATCH merge, locking
+│   ├── HardwareConfig.h/.cpp   ← runtime hardware topology, read-modify-write save
+│   ├── FlightRecorder.h/.cpp   ← persistent ring-buffer event log (Core 0 eviction)
+│   ├── SessionLogger.h/.cpp    ← per-run CSV stream (Core 0 write path via queue)
+│   ├── RulesEngine.h           ← threshold → actuator automation rules
+│   ├── MAVLinkOutput.h         ← MAVLink v1 TX (hand-crafted CRC-16/MCRF4XX)
+│   ├── ClusterSerial.h/.cpp    ← JetEcu serial telemetry protocol v2
+│   ├── CommandQueue.h/.cpp     ← FreeRTOS queue, Core 0 → Core 1 commands
+│   ├── Watchdog.h              ← ESP32 TWDT, 5 s timeout
+│   └── web/                    ← ESPAsyncWebServer, WebSocket push, REST API
 │
-└── platform/esp32/         ← MCU-specific code (PCNT, LEDC, PlatformInit, StatusLED)
+└── platform/esp32/
+    ├── PlatformInit.h          ← Serial, LittleFS, NVS boot counter, ADC attenuation
+    └── StatusLED.h             ← mode-driven blink pattern state machine
 ```
 
 **Threading model:**
-- Core 1 (Arduino loop): sensors → EngineData → safety → sequencer → controllers → actuators → watchdog
-- Core 0 (FreeRTOS): Wi-Fi + AsyncWebServer + WebSocket telemetry push
+- **Core 1** (Arduino loop): sensors → RC input → safety → sequencer → controllers → limp cap → tool timers → relight → AB trigger → starter assist → standby oil → DI polling → buzzer → rules engine → actuators → flight recorder → session logger → cluster → MAVLink → LED → peaks
+- **Core 0** (FreeRTOS task): Wi-Fi + AsyncWebServer + WebSocket telemetry push + LittleFS writes (session log drain, flight recorder eviction, config flush)
 
-`EngineData` fields are `volatile` — Core 0 reads are safe without mutex. Commands travel Core 0 → Core 1 only via `CommandQueue` (FreeRTOS queue, non-blocking on both ends).
+`EngineData` fields are `volatile` — individual 32-bit reads on Xtensa ESP32 are atomic; Core 0 reads are safe without a mutex. Commands travel Core 0 → Core 1 only via `CommandQueue`.
 
-For full architecture detail, see [`DESIGN_SPEC.md`](DESIGN_SPEC.md).
+---
+
+## Build environments
+
+| Environment | Target | Notes |
+|---|---|---|
+| `esp32dev` | Classic ESP32 (240 MHz, 4 MB) | ADC1: GPIO 32–39 |
+| `esp32s3dev` | ESP32-S3 (240 MHz, 4 MB) | ADC1: GPIO 1–10; GPIO 19/20 reserved for USB |
+
+```bash
+pio run -e esp32dev   -t upload      # firmware
+pio run -e esp32dev   -t uploadfs    # LittleFS web assets
+pio run -e esp32s3dev -t upload
+pio run -e esp32s3dev -t uploadfs
+```
 
 ---
 
@@ -256,19 +324,19 @@ For full architecture detail, see [`DESIGN_SPEC.md`](DESIGN_SPEC.md).
 
 | Flag | Effect |
 |---|---|
-| `OT_DEV_MODE` | Allow config changes during engine operation, enable mock sensors/actuators, bypass safety locks. **Never ship with this enabled.** |
+| `OT_DEV_MODE` | Enables mock sensors/actuators, live config changes during run, safety bypasses, bench mode toggle. **Never include in a production build.** |
 
 ---
 
-## Safety notes
+## Safety
 
-> OpenTurbine is provided as-is for experimental and educational use. Jet turbines are high-energy machines capable of causing serious injury or death. The software STOP command and web UI are supplementary controls only — a **hardware STOP switch** wired directly to `OT_STOP_PIN` is mandatory. Always follow your local regulations and safety guidelines when operating turbine engines.
+> OpenTurbine is provided as-is for experimental and educational use. Jet turbines are high-energy machines capable of causing serious injury or death. The software STOP command and web UI are **supplementary controls only** — a **hardware STOP switch** wired directly to `stopPin` is mandatory and must be capable of cutting engine power independently of the microcontroller. Always follow local regulations and safety guidelines when operating turbine engines.
 
 ---
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history.
+See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -280,4 +348,8 @@ MIT — see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Pull requests welcome. Please keep PRs focused — one feature or fix per PR. If you're adding a new sensor or actuator type, follow the `ISensor` / `IActuator` interface pattern in `hal/`. If you're adding a new sequence block, follow `IBlock` in `engine/sequencer/`.
+Pull requests welcome. Keep PRs focused — one feature or fix per PR.
+- New sensor driver → implement `ISensor` in `hal/sensors/`
+- New actuator driver → implement `IActuator` in `hal/actuators/`
+- New sequence block → implement `IBlock` in `engine/sequencer/blocks/`, register in `_blockRegistry[]` in `main.cpp`
+- New config parameter → add to `Config.h`, `_fromDoc()`, `_toDoc()`, and the web Config page
